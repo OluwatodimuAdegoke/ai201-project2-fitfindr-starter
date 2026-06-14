@@ -100,7 +100,7 @@ def _new_session(query: str, wardrobe: dict) -> dict:
 
 # ── planning loop ─────────────────────────────────────────────────────────────
 
-def run_agent(query: str, wardrobe: dict) -> dict:
+def run_agent(query: str, wardrobe: dict, verbose: bool = False) -> dict:
     """
     Main agent entry point. Runs the FitFindr planning loop for a single
     user interaction and returns the completed session dict.
@@ -110,6 +110,9 @@ def run_agent(query: str, wardrobe: dict) -> dict:
                   (e.g., "vintage graphic tee under $30, size M")
         wardrobe: User's wardrobe dict — use get_example_wardrobe() or
                   get_empty_wardrobe() from utils/data_loader.py
+        verbose:  If True, print a step-by-step trace of which tool is being
+                  called and what state is passed between tools — useful for
+                  demos and debugging. Does not change the returned session.
 
     Returns:
         The session dict after the interaction completes. Check session["error"]
@@ -145,18 +148,33 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     Before writing code, complete the Planning Loop and State Management sections
     of planning.md — your implementation should match what you described there.
     """
+    def trace(msg: str) -> None:
+        if verbose:
+            print(msg)
+
     # Step 1: fresh session — the single source of truth for this interaction.
     session = _new_session(query, wardrobe)
+    trace(f'\nUSER QUERY: "{query}"')
+    trace(f"Wardrobe: {len(wardrobe.get('items', []))} item(s)")
 
     # Step 2: parse the query into search parameters.
     session["parsed"] = _parse_query(query)
+    trace(f"\n[Step 2] Parsed query -> {session['parsed']}")
 
     # Step 3: search. Branch on the result — this is the planning decision.
+    trace(
+        "[Step 3] Calling TOOL search_listings("
+        f"description={session['parsed']['description']!r}, "
+        f"size={session['parsed']['size']!r}, "
+        f"max_price={session['parsed']['max_price']!r}) "
+        "-- because every interaction starts by finding a matching listing."
+    )
     session["search_results"] = search_listings(
         description=session["parsed"]["description"],
         size=session["parsed"]["size"],
         max_price=session["parsed"]["max_price"],
     )
+    trace(f"           search_listings returned {len(session['search_results'])} result(s).")
     if not session["search_results"]:
         parsed = session["parsed"]
         criteria = [f"'{parsed['description']}'"]
@@ -170,20 +188,40 @@ def run_agent(query: str, wardrobe: dict) -> dict:
             "keywords."
         )
         # Do NOT call suggest_outfit / create_fit_card with empty input.
+        trace(
+            "           [ERROR BRANCH] No results -> setting session['error'] and "
+            "returning EARLY. suggest_outfit / create_fit_card are NOT called."
+        )
+        trace(f"           session['error'] = {session['error']!r}")
         return session
 
     # Step 4: select the top-ranked listing.
     session["selected_item"] = session["search_results"][0]
+    trace(
+        "[Step 4] STATE: session['selected_item'] = "
+        f"{session['selected_item']['id']} \"{session['selected_item']['title']}\" "
+        f"(${session['selected_item']['price']:g}, {session['selected_item']['platform']})"
+    )
 
     # Step 5: suggest an outfit using the selected item + the user's wardrobe.
+    trace(
+        "[Step 5] Calling TOOL suggest_outfit(selected_item, wardrobe) "
+        "-- passing the SAME selected_item from Step 4 into the LLM, plus the wardrobe."
+    )
     session["outfit_suggestion"] = suggest_outfit(
         session["selected_item"], session["wardrobe"]
     )
+    trace("           STATE: session['outfit_suggestion'] now set (passed to Step 6).")
 
     # Step 6: turn the outfit into a shareable fit card.
+    trace(
+        "[Step 6] Calling TOOL create_fit_card(outfit_suggestion, selected_item) "
+        "-- chaining Step 5's outfit AND Step 4's item into the caption."
+    )
     session["fit_card"] = create_fit_card(
         session["outfit_suggestion"], session["selected_item"]
     )
+    trace("           STATE: session['fit_card'] now set. Done.\n")
 
     # Step 7: done — return the completed session.
     return session
@@ -194,21 +232,31 @@ def run_agent(query: str, wardrobe: dict) -> dict:
 if __name__ == "__main__":
     from utils.data_loader import get_example_wardrobe, get_empty_wardrobe
 
-    print("=== Happy path: graphic tee ===\n")
+    print("=" * 70)
+    print("HAPPY PATH — all 3 tools, state passing between them")
+    print("=" * 70)
     session = run_agent(
         query="looking for a vintage graphic tee under $30",
         wardrobe=get_example_wardrobe(),
+        verbose=True,
     )
     if session["error"]:
         print(f"Error: {session['error']}")
     else:
-        print(f"Found: {session['selected_item']['title']}")
-        print(f"\nOutfit: {session['outfit_suggestion']}")
-        print(f"\nFit card: {session['fit_card']}")
+        print("----- FINAL OUTPUT -----")
+        print(f"🛍️  Found:    {session['selected_item']['title']}")
+        print(f"\n👗  Outfit:   {session['outfit_suggestion']}")
+        print(f"\n✨  Fit card: {session['fit_card']}")
 
-    print("\n\n=== No-results path ===\n")
+    print("\n\n" + "=" * 70)
+    print("FAILURE PATH — search returns nothing, agent stops gracefully")
+    print("=" * 70)
     session2 = run_agent(
         query="designer ballgown size XXS under $5",
         wardrobe=get_example_wardrobe(),
+        verbose=True,
     )
-    print(f"Error message: {session2['error']}")
+    print("----- FINAL OUTPUT -----")
+    print(f"🛍️  Error:    {session2['error']}")
+    print(f"👗  Outfit:   {session2['outfit_suggestion']}   (never generated)")
+    print(f"✨  Fit card: {session2['fit_card']}   (never generated)")
