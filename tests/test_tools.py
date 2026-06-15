@@ -17,7 +17,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tools import search_listings, suggest_outfit, create_fit_card  # noqa: E402
-from agent import _parse_query  # noqa: E402
+from agent import _parse_query, run_agent  # noqa: E402
+from utils.data_loader import get_example_wardrobe  # noqa: E402
 
 
 # ── search_listings ───────────────────────────────────────────────────────────
@@ -92,3 +93,17 @@ def test_parse_description_falls_back_to_full_query():
     parsed = _parse_query("flowy midi skirt")
     assert parsed["max_price"] is None
     assert "skirt" in parsed["description"].lower()
+
+
+# ── planning loop: retry/fallback + early exit (no LLM calls on these paths) ───
+
+def test_retry_loop_loosens_then_errors_when_truly_no_match():
+    # "designer ballgown" matches no keywords, so even fully loosened search is
+    # empty. The loop should still try dropping size then price (recording both),
+    # then end on the error path WITHOUT calling the LLM tools.
+    session = run_agent("designer ballgown size XXS under $5", get_example_wardrobe())
+    assert session["error"] is not None
+    assert session["adjustments"] == ["removed the size filter", "ignored the price limit"]
+    assert session["selected_item"] is None
+    assert session["outfit_suggestion"] is None
+    assert session["fit_card"] is None  # downstream tools never ran

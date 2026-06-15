@@ -72,10 +72,16 @@ each tool returns — it does **not** call all three tools unconditionally:
 2. **Parse** the query with regex/string rules — no LLM call — into `description`, `size`, and
    `max_price` (e.g. `"under $30"` → `max_price=30.0`, `"size M"` → `size="M"`). Stored in
    `session["parsed"]`.
-3. **Search:** call `search_listings(**parsed)`.
-   - **Branch — error path:** if the result is `[]`, set `session["error"]` to an actionable
-     message and **return immediately**. `suggest_outfit` and `create_fit_card` are never
-     called, and `fit_card` stays `None`. *This conditional is the core of the planning loop.*
+3. **Search (with a retry loop):** call `search_listings(**parsed)`.
+   - **Retry branch:** if the result is `[]` and a loosenable filter is still active, the agent
+     reacts by dropping one constraint and searching again — first the **size** filter, then the
+     **price ceiling** — recording each change in `session["adjustments"]`. It keeps trying until
+     results appear or all filters are exhausted. This is the input-driven part of the loop: the
+     agent changes its own parameters in response to what came back, rather than running a fixed
+     pass. If a retry succeeds, `session["notice"]` explains what was loosened.
+   - **Error path:** if results are *still* `[]` after loosening, set `session["error"]` to an
+     actionable message and **return immediately**. `suggest_outfit` and `create_fit_card` are
+     never called, and `fit_card` stays `None`.
 4. **Select** the top-ranked listing → `session["selected_item"]`.
 5. **Suggest** an outfit from the selected item + wardrobe → `session["outfit_suggestion"]`.
 6. **Fit card** from the outfit + selected item → `session["fit_card"]`.
@@ -97,6 +103,8 @@ the user, and no hardcoded values bridge the steps.
 | `query` | caller | parse step |
 | `parsed` (`description` / `size` / `max_price`) | parse step | `search_listings` |
 | `search_results` | `search_listings` | select step / empty-check |
+| `adjustments` (list[str]) | retry loop | error message / `notice` |
+| `notice` (str \| None) | retry loop | UI (shown above the listing) |
 | `selected_item` | select step | `suggest_outfit` **and** `create_fit_card` |
 | `wardrobe` | caller | `suggest_outfit` |
 | `outfit_suggestion` | `suggest_outfit` | `create_fit_card` |
@@ -133,6 +141,25 @@ Try raising your price, dropping the size filter, or using broader keywords.
 By contrast, `"looking for a vintage graphic tee under $30"` returned the *Vintage Graphic Hoodie*,
 an outfit naming wardrobe pieces (baggy straight-leg jeans, black combat boots), and a fit card
 caption mentioning the item, `$26`, and `depop` — the full three-tool chain.
+
+---
+
+## Stretch Features
+
+**Retry logic with fallback (implemented).** When `search_listings` returns nothing, the planning
+loop automatically retries with progressively loosened constraints — first dropping the size
+filter, then the price ceiling — and tells the user what it changed via `session["notice"]`
+(e.g. *"No exact matches, so I removed the size filter and ignored the price limit to find
+these."*). It only falls back to the error path if even the fully loosened search is empty. This
+is documented in `planning.md` under **Stretch Features** and turns the search step into a genuine
+input-driven loop. Example trace (`python agent.py`):
+
+```
+[Step 3] search_listings(size='4XL', max_price=1.0)  -> 0 result(s).
+   [RETRY] removed the size filter   -> 0 result(s).
+   [RETRY] ignored the price limit   -> 30 result(s).
+   NOTICE: No exact matches, so I removed the size filter and ignored the price limit to find these.
+```
 
 ---
 

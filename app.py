@@ -63,8 +63,11 @@ def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
     # 5. Happy path — format the selected listing for the first panel.
     item = session["selected_item"]
     brand = item.get("brand") or "—"
+    # Retry-loop notice: if filters were loosened to find a match, say so up top.
+    notice_prefix = f"ℹ️ {session['notice']}\n\n" if session.get("notice") else ""
     listing_text = (
-        f"{item['title']}\n"
+        notice_prefix
+        + f"{item['title']}\n"
         f"${item['price']:g} · {item['condition']} condition · {item['platform']}\n"
         f"Brand: {brand} · Size: {item['size']}\n"
         f"Style: {', '.join(item.get('style_tags', []))}\n\n"

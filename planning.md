@@ -70,6 +70,26 @@ None for the core submission. (Candidate stretch tool — `compare_price(new_ite
 
 ---
 
+## Stretch Features
+
+### Retry logic with fallback (implemented)
+
+**Goal:** when `search_listings` returns nothing, don't immediately give up — automatically retry with progressively loosened constraints and tell the user exactly what was relaxed.
+
+**Logic (lives in `run_agent`, not in the tool):**
+1. Run the search with the parsed `description`, `size`, and `max_price`.
+2. While the result is empty and a loosenable filter remains, drop **one** filter and search again, in this order:
+   - First drop **size** (set `size=None`) — record `"removed the size filter"`.
+   - Then drop the **price ceiling** (set `max_price=None`) — record `"ignored the price limit"`.
+   - `description` is never dropped — searching with no keywords would return arbitrary items.
+3. Each relaxation note is appended to `session["adjustments"]` (a `list[str]`).
+4. If a retry succeeds, proceed normally (select top item → suggest_outfit → create_fit_card) **and** surface what was changed via `session["notice"]`, e.g. *"No exact matches, so I removed the size filter and ignored the price limit to find these."*
+5. If every loosenable filter has been dropped and the result is still empty, fall back to the normal error path (`session["error"]`, return early).
+
+**Why this strengthens the planning loop:** it adds a genuine input-driven loop — the agent observes an empty result, mutates its own search parameters, and re-acts — instead of a single fixed pass. New session fields: `adjustments` (list[str]) and `notice` (str | None).
+
+---
+
 ## Planning Loop
 
 **How does your agent decide which tool to call next?**
@@ -82,8 +102,9 @@ None for the core submission. (Candidate stretch tool — `compare_price(new_ite
    - `size`: search for `size <token>` or a standalone size word (`re.search(r'\bsize\s+([\w/]+)\b', query)`, plus a fallback list of `S/M/L/XL` and `US \d`); else `None`.
    - `description`: the query with the matched size/price phrases stripped out; falls back to the full query.
    - Store all three in `session["parsed"]`.
-3. **Search** — call `search_listings(**session["parsed"])`; store in `session["search_results"]`.
-   - **Branch (error path):** if `search_results == []`, set `session["error"]` to a helpful message naming the parsed criteria and `return session` immediately. `outfit_suggestion` and `fit_card` stay `None`. **This is the key conditional — the next two tools are not called when search is empty.**
+3. **Search (with retry loop — see Stretch Features)** — call `search_listings(**session["parsed"])`; store in `session["search_results"]`.
+   - **Retry branch:** if the result is empty *and* at least one filter (size, then price) is still active, drop that filter and search again, recording a human-readable note in `session["adjustments"]`. Repeat until results are found or all loosenable filters are exhausted. This is the "respond to what was returned" loop: the agent reacts to an empty result by changing its own parameters rather than running a fixed sequence.
+   - **Branch (error path):** if results are *still* empty after loosening, set `session["error"]` to a helpful message naming the parsed criteria and `return session` immediately. `outfit_suggestion` and `fit_card` stay `None`. **The next two tools are not called when search is empty.**
 4. **Select** — `session["selected_item"] = session["search_results"][0]` (top-ranked).
 5. **Suggest** — call `suggest_outfit(session["selected_item"], session["wardrobe"])`; store in `session["outfit_suggestion"]`.
 6. **Fit card** — call `create_fit_card(session["outfit_suggestion"], session["selected_item"])`; store in `session["fit_card"]`.

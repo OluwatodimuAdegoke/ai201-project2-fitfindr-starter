@@ -90,6 +90,8 @@ def _new_session(query: str, wardrobe: dict) -> dict:
         "query": query,              # original user query
         "parsed": {},                # extracted description / size / max_price
         "search_results": [],        # list of matching listing dicts
+        "adjustments": [],           # retry loop: filters loosened, in order
+        "notice": None,              # user-facing note about any loosened filters
         "selected_item": None,       # top result, passed into suggest_outfit
         "wardrobe": wardrobe,        # user's wardrobe dict
         "outfit_suggestion": None,   # string returned by suggest_outfit
@@ -161,39 +163,73 @@ def run_agent(query: str, wardrobe: dict, verbose: bool = False) -> dict:
     session["parsed"] = _parse_query(query)
     trace(f"\n[Step 2] Parsed query -> {session['parsed']}")
 
-    # Step 3: search. Branch on the result — this is the planning decision.
+    # Step 3: search — with a retry loop that loosens filters on empty results.
+    # The agent reacts to what search returns: empty + a droppable filter -> relax
+    # one constraint and search again, instead of a single fixed pass.
+    parsed = session["parsed"]
+    active = {
+        "description": parsed["description"],
+        "size": parsed["size"],
+        "max_price": parsed["max_price"],
+    }
+    # Filters we may drop, in order, each with the note we show the user.
+    relax_steps = []
+    if active["size"] is not None:
+        relax_steps.append(("size", "removed the size filter"))
+    if active["max_price"] is not None:
+        relax_steps.append(("max_price", "ignored the price limit"))
+
     trace(
         "[Step 3] Calling TOOL search_listings("
-        f"description={session['parsed']['description']!r}, "
-        f"size={session['parsed']['size']!r}, "
-        f"max_price={session['parsed']['max_price']!r}) "
-        "-- because every interaction starts by finding a matching listing."
+        f"description={active['description']!r}, size={active['size']!r}, "
+        f"max_price={active['max_price']!r}) "
+        "-- every interaction starts by finding a matching listing."
     )
-    session["search_results"] = search_listings(
-        description=session["parsed"]["description"],
-        size=session["parsed"]["size"],
-        max_price=session["parsed"]["max_price"],
-    )
-    trace(f"           search_listings returned {len(session['search_results'])} result(s).")
+    session["search_results"] = search_listings(**active)
+    trace(f"           -> {len(session['search_results'])} result(s).")
+
+    step_idx = 0
+    while not session["search_results"] and step_idx < len(relax_steps):
+        field, note = relax_steps[step_idx]
+        active[field] = None
+        session["adjustments"].append(note)
+        trace(
+            f"           [RETRY] empty -> {note}; re-running search_listings("
+            f"size={active['size']!r}, max_price={active['max_price']!r})."
+        )
+        session["search_results"] = search_listings(**active)
+        trace(f"           -> {len(session['search_results'])} result(s).")
+        step_idx += 1
+
     if not session["search_results"]:
-        parsed = session["parsed"]
         criteria = [f"'{parsed['description']}'"]
         if parsed["size"]:
             criteria.append(f"size {parsed['size']}")
         if parsed["max_price"] is not None:
             criteria.append(f"under ${parsed['max_price']:g}")
+        tried = (
+            " even after I " + " and ".join(session["adjustments"])
+            if session["adjustments"]
+            else ""
+        )
         session["error"] = (
-            "No listings matched " + " ".join(criteria) + ". "
-            "Try raising your price, dropping the size filter, or using broader "
-            "keywords."
+            "No listings matched " + " ".join(criteria) + tried + ". "
+            "Try broader keywords or a different item."
         )
         # Do NOT call suggest_outfit / create_fit_card with empty input.
         trace(
-            "           [ERROR BRANCH] No results -> setting session['error'] and "
-            "returning EARLY. suggest_outfit / create_fit_card are NOT called."
+            "           [ERROR BRANCH] still empty after retries -> set error, "
+            "return EARLY. suggest_outfit / create_fit_card are NOT called."
         )
         trace(f"           session['error'] = {session['error']!r}")
         return session
+
+    if session["adjustments"]:
+        session["notice"] = (
+            "No exact matches, so I " + " and ".join(session["adjustments"])
+            + " to find these."
+        )
+        trace(f"           NOTICE: {session['notice']!r}")
 
     # Step 4: select the top-ranked listing.
     session["selected_item"] = session["search_results"][0]
@@ -247,6 +283,22 @@ if __name__ == "__main__":
         print(f"🛍️  Found:    {session['selected_item']['title']}")
         print(f"\n👗  Outfit:   {session['outfit_suggestion']}")
         print(f"\n✨  Fit card: {session['fit_card']}")
+
+    print("\n\n" + "=" * 70)
+    print("RETRY PATH — empty search loosens filters and tries again")
+    print("=" * 70)
+    session_retry = run_agent(
+        query="vintage denim jacket size 4XL under $1",
+        wardrobe=get_example_wardrobe(),
+        verbose=True,
+    )
+    print("----- FINAL OUTPUT -----")
+    if session_retry["error"]:
+        print(f"🛍️  Error:    {session_retry['error']}")
+    else:
+        print(f"ℹ️  Notice:   {session_retry['notice']}")
+        print(f"🛍️  Found:    {session_retry['selected_item']['title']}")
+        print(f"   Adjustments made: {session_retry['adjustments']}")
 
     print("\n\n" + "=" * 70)
     print("FAILURE PATH — search returns nothing, agent stops gracefully")
